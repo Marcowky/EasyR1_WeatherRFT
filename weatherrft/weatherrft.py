@@ -1,4 +1,8 @@
 import re
+import copy
+import json
+import os
+
 from typing import Any, Dict, List
 
 
@@ -67,11 +71,12 @@ def accuracy_reward(response: str, ground_truth: str) -> float:
     return reward
 
 
-def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.1) -> List[Dict[str, float]]:
+def compute_score(reward_inputs: List[Dict[str, Any]], cur_stat: str, cur_step: int, save_path: str, format_weight: float = 0.1) -> List[Dict[str, float]]:
     if not isinstance(reward_inputs, list):
         raise ValueError("Please use `reward_type=batch` for math reward function.")
 
     scores = []
+    save_datas = []
     for reward_input in reward_inputs:
         response = re.sub(r"\s*(<|>|/)\s*", r"\1", reward_input["response"])  # handle qwen2.5vl-32b format
         format_score = format_reward(response)
@@ -83,5 +88,24 @@ def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.
                 "accuracy": accuracy_score,
             }
         )
+        # 保存详细的评分数据
+        temp_data = copy.deepcopy(reward_input)
+        del temp_data["response_length"]
+        temp_data['score'] = scores[-1]
+        save_datas.append(temp_data)
+
+    # 构造保存路径
+    base_save_path = os.path.join(save_path, 'detailed_scores', f"stat_{cur_stat}_step_{cur_step}")
+    # 创建目录（如果不存在）
+    os.makedirs(os.path.dirname(base_save_path), exist_ok=True)
+    # 若文件已存在，则重命名备份
+    counter = 0
+    json_save_path = f"{base_save_path}_{counter}.json"
+    while os.path.exists(json_save_path):
+        counter += 1
+        json_save_path = f"{base_save_path}_{counter}.json"
+    # 保存到 json
+    with open(json_save_path, "w") as f:
+        json.dump(save_datas, f, indent=4, ensure_ascii=False)
 
     return scores

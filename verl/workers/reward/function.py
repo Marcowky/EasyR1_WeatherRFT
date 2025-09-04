@@ -80,7 +80,7 @@ class FunctionRewardManager(ABC):
 class SequentialFunctionRewardManager(FunctionRewardManager):
     reward_fn: SequentialRewardFunction
 
-    def compute_reward(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
+    def compute_reward(self, data: DataProto, cur_stat: str, cur_step: int, save_path: str) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
         response_ids = data.batch["responses"]
@@ -95,7 +95,10 @@ class SequentialFunctionRewardManager(FunctionRewardManager):
                     "response": response_str,
                     "response_length": response_length[i],
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
-                }
+                    "problem": data.non_tensor_batch["problem"][i],
+                    "multi_modal_data": data.non_tensor_batch["multi_modal_data"][i]
+                },
+                cur_stat, cur_step, save_path
             )
             reward_tensor[i, response_length[i] - 1] = score["overall"]
             for key, value in score.items():
@@ -107,7 +110,7 @@ class SequentialFunctionRewardManager(FunctionRewardManager):
 class BatchFunctionRewardManager(FunctionRewardManager):
     reward_fn: BatchRewardFunction
 
-    def compute_reward(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
+    def compute_reward(self, data: DataProto, cur_stat: str, cur_step: int, save_path: str) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
         reward_inputs = []
         response_ids = data.batch["responses"]
         response_length = data.batch["response_mask"].sum(dim=-1)
@@ -121,10 +124,12 @@ class BatchFunctionRewardManager(FunctionRewardManager):
                     "response": response_str,
                     "response_length": response_length[i],
                     "ground_truth": data.non_tensor_batch["ground_truth"][i],
+                    "problem": data.non_tensor_batch["problem"][i],
+                    "multi_modal_data": data.non_tensor_batch["multi_modal_data"][i]
                 }
             )
 
-        scores = self.reward_fn(reward_inputs)
+        scores = self.reward_fn(reward_inputs, cur_stat, cur_step, save_path)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
         for i, score in enumerate(scores):

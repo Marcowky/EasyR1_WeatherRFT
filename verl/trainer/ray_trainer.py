@@ -402,7 +402,7 @@ class RayPPOTrainer:
             test_batch = test_batch.union(test_output_gen_batch)
 
             # evaluate using reward_function
-            reward_tensor, reward_metrics = ray.get(self.val_reward_fn.compute_reward.remote(test_batch))
+            reward_tensor, reward_metrics = ray.get(self.val_reward_fn.compute_reward.remote(test_batch, "val", self.global_step, self.config.trainer.save_checkpoint_path))
 
             # store generations
             input_ids = test_batch.batch["prompts"]
@@ -476,7 +476,7 @@ class RayPPOTrainer:
                 gen_baseline_output = self.actor_rollout_ref_wg.generate_sequences(gen_baseline_batch)
 
                 new_batch = new_batch.union(gen_baseline_output)
-                reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch))
+                reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch, "train", self.global_step, self.config.trainer.save_checkpoint_path))
                 reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                 new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
@@ -492,7 +492,7 @@ class RayPPOTrainer:
 
             # filter group
             if self.config.algorithm.online_filtering:
-                reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
+                reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch, "train", self.global_step, self.config.trainer.save_checkpoint_path))
                 new_batch.batch["token_level_scores"] = reward_tensor
                 for k, v in reward_metrics.items():
                     all_metrics[k].extend(v)
@@ -577,7 +577,7 @@ class RayPPOTrainer:
                 # compute reward
                 if "token_level_scores" not in batch.batch:
                     with timer("reward", timing_raw):
-                        reward_ref = self.reward_fn.compute_reward.remote(batch)
+                        reward_ref = self.reward_fn.compute_reward.remote(batch, "train", self.global_step, self.config.trainer.save_checkpoint_path)
 
                 # recompute old_log_probs
                 with timer("old", timing_raw):
