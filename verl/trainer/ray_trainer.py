@@ -476,7 +476,7 @@ class RayPPOTrainer:
                 gen_baseline_output = self.actor_rollout_ref_wg.generate_sequences(gen_baseline_batch)
 
                 new_batch = new_batch.union(gen_baseline_output)
-                reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch, "train", self.global_step, self.config.trainer.save_checkpoint_path))
+                reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch, "train_remax", self.global_step, self.config.trainer.save_checkpoint_path))
                 reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
 
                 new_batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
@@ -492,7 +492,7 @@ class RayPPOTrainer:
 
             # filter group
             if self.config.algorithm.online_filtering:
-                reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch, "train", self.global_step, self.config.trainer.save_checkpoint_path))
+                reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch, "train_online_filtering", self.global_step, self.config.trainer.save_checkpoint_path))
                 new_batch.batch["token_level_scores"] = reward_tensor
                 for k, v in reward_metrics.items():
                     all_metrics[k].extend(v)
