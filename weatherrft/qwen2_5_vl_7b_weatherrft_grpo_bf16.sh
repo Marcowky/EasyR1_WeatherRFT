@@ -46,4 +46,5 @@ python3 -m verl.trainer.main \
     trainer.n_gpus_per_node=${GPU_NUMS} \
     trainer.save_checkpoint_path=${SAVE_CHECKPOINT_PATH} \
     data.train_files=${TRAIN_FILE} \
-    data.format_prompt=${FORMAT_PROMPT}
+    data.format_prompt=${FORMAT_PROMPT} \
+    | tee ${SAVE_CHECKPOINT_PATH}/train.log
