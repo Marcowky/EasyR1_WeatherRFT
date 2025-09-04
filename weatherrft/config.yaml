@@ -1,5 +1,5 @@
 data:
-  train_files: /home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/train.json
+  train_files: /home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/split/train_500hpa_situation.json
   val_files: /home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/val.json
   prompt_key: problem
   answer_key: answer
@@ -81,10 +81,10 @@ worker:
     reward_function: ./weatherrft/weatherrft.py:compute_score
 
 trainer:
-  total_epochs: 2
+  total_epochs: 15
   max_steps: null
   project_name: weatherrft
-  experiment_name: qwen2_5_7b_weatherrft_grpo
+  experiment_name: qwen2_5_7b_weatherrft_grpo_500hpa_situation
   logger: ["console", "wandb"]
   nnodes: 1
   n_gpus_per_node: 8
@@ -94,7 +94,7 @@ trainer:
   val_only: false
   val_generations_to_log: 3
   save_freq: 5  # -1 to disable
-  save_limit: 3  # -1 to disable
+  save_limit: 5  # -1 to disable
   save_model_only: false
   save_checkpoint_path: null
   load_checkpoint_path: null
