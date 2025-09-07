@@ -24,7 +24,8 @@ CONFIG_PATH=weatherrft/config.yaml
 TRAIN_FILE=/home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/split/train_500hpa_situation.json
 VAL_FILE=/home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/val_all.json
 
-REWARD_PATH=./weatherrft/weatherrft.py
+# REWARD_PATH=./weatherrft/weatherrft.py
+REWARD_PATH=./weatherrft/weatherrft_with_logic_reward.py
 
 # FORMAT_PROMPT=./weatherrft/weatherrft.jinja
 FORMAT_PROMPT=./weatherrft/weatherrft_seperate_choice_prompt.jinja
