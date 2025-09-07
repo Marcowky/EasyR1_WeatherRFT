@@ -20,9 +20,15 @@ PROJECT_NAME=weatherrft
 EXPERIMENT_NAME=qwen2_5_7b_weatherrft_grpo_500hpa_situation
 
 CONFIG_PATH=weatherrft/config.yaml
+
 TRAIN_FILE=/home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/split/train_500hpa_situation.json
+VAL_FILE=/home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/val_all.json
+
 REWARD_PATH=./weatherrft/weatherrft.py
-FORMAT_PROMPT=./weatherrft/weatherrft.jinja
+
+# FORMAT_PROMPT=./weatherrft/weatherrft.jinja
+FORMAT_PROMPT=./weatherrft/weatherrft_seperate_choice_prompt.jinja
+
 SAVE_CHECKPOINT_PATH=./checkpoints/${PROJECT_NAME}/${DATE}-${EXPERIMENT_NAME}
 
 ROLLOUT_NUM=5
@@ -46,5 +52,6 @@ python3 -m verl.trainer.main \
     trainer.n_gpus_per_node=${GPU_NUMS} \
     trainer.save_checkpoint_path=${SAVE_CHECKPOINT_PATH} \
     data.train_files=${TRAIN_FILE} \
+    data.val_files=${VAL_FILE} \
     data.format_prompt=${FORMAT_PROMPT} \
     | tee ${SAVE_CHECKPOINT_PATH}/train.log
