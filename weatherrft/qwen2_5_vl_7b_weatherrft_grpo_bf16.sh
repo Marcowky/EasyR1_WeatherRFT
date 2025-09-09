@@ -11,6 +11,7 @@ export NCCL_PROTO=Simple
 export NCCL_MIN_NCHANNELS=2
 export NCCL_MAX_NCHANNELS=4
 export CUDA_VISIBLE_DEVICES=1,2,3,4
+NUMA_NODE=0
 
 DATE=$(date +%Y%m%d_%H%M%S)
 GPU_NUMS=4
@@ -41,7 +42,9 @@ cp $0 ${SAVE_CHECKPOINT_PATH}/run.sh
 cp ${REWARD_PATH} ${SAVE_CHECKPOINT_PATH}/reward.py
 cp ${FORMAT_PROMPT} ${SAVE_CHECKPOINT_PATH}/prompt.jinja
 
+# 这里可选是否绑定 numa 节点，注意，需要注释掉之前的 P2P 设置
 python3 -m verl.trainer.main \
+# numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} python3 -m verl.trainer.main \
     worker.actor.fsdp.torch_dtype=bf16 \
     worker.actor.optim.strategy=adamw_bf16 \
     config=${CONFIG_PATH} \
