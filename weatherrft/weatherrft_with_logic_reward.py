@@ -23,7 +23,8 @@ def call_client_model(query: str) -> str:
             "role": "user", 
             "content": query
         }],
-        temperature=0
+        temperature=0,
+        max_tokens=512
     )
     return chat_response.choices[0].message.content
 
