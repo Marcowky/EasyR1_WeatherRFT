@@ -26,7 +26,8 @@ TRAIN_FILE=/home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/Weather
 VAL_FILE=/home/kaiyu/Project/ICASSP_weatherrft/WeatherRFT/data/dataset/WeatherCQ/EasyR1/WeatherCQ_dataset_deepseek_v3_en/val_all.json
 
 # REWARD_PATH=./weatherrft/weatherrft.py
-REWARD_PATH=./weatherrft/weatherrft_with_logic_reward.py
+# REWARD_PATH=./weatherrft/weatherrft_with_logic_reward.py
+REWARD_PATH=./weatherrft/weatherrft_with_logic_reward_val_acc.py
 
 # FORMAT_PROMPT=./weatherrft/weatherrft.jinja
 FORMAT_PROMPT=./weatherrft/weatherrft_seperate_choice_prompt.jinja
@@ -44,7 +45,6 @@ cp ${FORMAT_PROMPT} ${SAVE_CHECKPOINT_PATH}/prompt.jinja
 
 # 这里可选是否绑定 numa 节点，注意，需要注释掉之前的 P2P 设置
 python3 -m verl.trainer.main \
-# numactl --cpunodebind=${NUMA_NODE} --membind=${NUMA_NODE} python3 -m verl.trainer.main \
     worker.actor.fsdp.torch_dtype=bf16 \
     worker.actor.optim.strategy=adamw_bf16 \
     config=${CONFIG_PATH} \
