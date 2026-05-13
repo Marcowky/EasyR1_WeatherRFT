@@ -16,7 +16,7 @@ Rollout config
 """
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -37,7 +37,8 @@ class RolloutConfig:
     max_model_len: Optional[int] = None
     max_num_batched_tokens: int = 8192
     disable_log_stats: bool = True
-    val_override_config: Dict[str, Any] = field(default_factory=dict)
+    disable_tqdm: bool = False
+    val_override_config: dict[str, Any] = field(default_factory=dict)
     # below are auto keys
     prompt_length: int = field(default=-1, init=False)
     response_length: int = field(default=-1, init=False)

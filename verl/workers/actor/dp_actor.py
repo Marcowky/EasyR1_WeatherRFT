@@ -17,22 +17,29 @@ Implement Actor
 
 import os
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
+import torch.distributed as dist
 from einops import rearrange
 from ray.experimental.tqdm_ray import tqdm
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from transformers.modeling_flash_attention_utils import index_first_axis, pad_input, unpad_input
 
-from ...protocol import DataProto
+from ...protocol import DataProto, batch_collate
 from ...trainer.core_algos import average_loss, compute_kl, compute_policy_loss
 from ...utils import torch_functional as VF
 from ...utils.py_functional import append_to_dict
+from ...utils.seqlen_balancing import prepare_dynamic_batch, restore_dynamic_batch
 from ...utils.ulysses import gather_outputs_and_unpad, ulysses_pad_and_slice_inputs
 from .base import BasePPOActor
 from .config import ActorConfig
+
+
+try:
+    from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+except ImportError:
+    pass
 
 
 __all__ = ["DataParallelPPOActor"]
@@ -50,6 +57,7 @@ class DataParallelPPOActor(BasePPOActor):
         """
         super().__init__(config)
         self.rank = int(os.getenv("RANK", "0"))
+        self.world_size = int(os.getenv("WORLD_SIZE", "1"))
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         if config.use_torch_compile:
@@ -57,7 +65,7 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             self.log_probs_from_logits = VF.log_probs_from_logits
 
-    def _forward_micro_batch(self, micro_batch: Dict[str, torch.Tensor], temperature: float) -> torch.Tensor:
+    def _forward_micro_batch(self, micro_batch: dict[str, torch.Tensor], temperature: float) -> torch.Tensor:
         """
         Returns:
             log_probs: # (bs, response_len)
@@ -69,24 +77,17 @@ class DataParallelPPOActor(BasePPOActor):
         responses = micro_batch["responses"]
         response_length = responses.size(-1)
         if position_ids.dim() == 3:  # qwen2vl mrope
-            position_ids = position_ids.transpose(0, 1)  # (bsz, 3, seqlen) -> (3, bsz, seqlen)
+            position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
 
         multi_modal_inputs = defaultdict(list)
         if "multi_modal_inputs" in micro_batch:
-            for input_dict in micro_batch["multi_modal_inputs"]:
-                for key, value in input_dict.items():
-                    multi_modal_inputs[key].append(value)
-
-            for key, value in multi_modal_inputs.items():
-                if len(value) != 0:
-                    multi_modal_inputs[key] = torch.cat(value, dim=0)
-                else:
-                    multi_modal_inputs[key] = None
+            multi_modal_inputs = batch_collate(micro_batch["multi_modal_inputs"])
+            multi_modal_inputs = {key: torch.cat(value, dim=0) for key, value in multi_modal_inputs.items()}
+        else:
+            multi_modal_inputs = {}
 
         if self.config.padding_free:
-            input_ids_rmpad, indices, *_ = unpad_input(
-                input_ids.unsqueeze(-1), attention_mask
-            )  # input_ids_rmpad (total_nnz, ...)
+            input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # (total_nnz, 1)
             input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
             # unpad the position_ids to align the rotary
@@ -95,7 +96,7 @@ class DataParallelPPOActor(BasePPOActor):
                     index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices)
                     .transpose(0, 1)
                     .unsqueeze(1)
-                )  # (3, bsz, seqlen) -> (3, 1, bsz * seqlen)
+                )  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
             else:
                 position_ids_rmpad = index_first_axis(
                     rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices
@@ -189,12 +190,16 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module.eval()
 
         temperature = data.meta_info["temperature"]
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        select_keys = ["input_ids", "attention_mask", "position_ids", "responses"]
         non_tensor_select_keys = ["multi_modal_inputs"]
 
-        micro_batches = data.select(select_keys, non_tensor_select_keys).split(
-            self.config.micro_batch_size_per_device_for_experience
-        )
+        data = data.select(select_keys, non_tensor_select_keys)
+        if self.config.dynamic_batching:
+            max_token_len = self.config.micro_batch_size_per_device_for_experience * data.batch["input_ids"].size(-1)
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+        else:
+            micro_batches = data.split(self.config.micro_batch_size_per_device_for_experience)
+
         log_probs_lst = []
         if self.rank == 0:
             micro_batches = tqdm(micro_batches, desc="Compute log probs", position=1)
@@ -205,13 +210,17 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs_lst.append(log_probs)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
+
+        if self.config.dynamic_batching:
+            log_probs = restore_dynamic_batch(log_probs, batch_idx_list)
+
         return log_probs
 
-    def update_policy(self, data: DataProto) -> Dict[str, Any]:
+    def update_policy(self, data: DataProto) -> dict[str, Any]:
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
-        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        select_keys = ["input_ids", "attention_mask", "position_ids", "responses", "response_mask"]
         select_keys.extend(["old_log_probs", "ref_log_probs", "advantages"])
         non_tensor_select_keys = ["multi_modal_inputs"]
 
@@ -225,19 +234,22 @@ class DataParallelPPOActor(BasePPOActor):
                 mini_batches = tqdm(mini_batches, desc="Train mini-batches", position=1)
 
             for mini_batch in mini_batches:
-                gradient_accumulation = (
-                    self.config.global_batch_size_per_device // self.config.micro_batch_size_per_device_for_update
-                )
-                micro_batches = mini_batch.split(self.config.micro_batch_size_per_device_for_update)
+                total_response_tokens = torch.sum(mini_batch.batch["response_mask"])
+                dist.all_reduce(total_response_tokens, op=dist.ReduceOp.SUM)
+
+                if self.config.dynamic_batching:
+                    max_input_len = mini_batch.batch["input_ids"].size(-1)
+                    max_token_len = self.config.micro_batch_size_per_device_for_update * max_input_len
+                    micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
+                else:
+                    micro_batches = mini_batch.split(self.config.micro_batch_size_per_device_for_update)
+
                 if self.rank == 0:
                     micro_batches = tqdm(micro_batches, desc="Update policy", position=2)
 
                 for micro_batch in micro_batches:
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
-                    responses = model_inputs["responses"]
-                    response_length = responses.size(1)
-                    attention_mask = model_inputs["attention_mask"]
-                    response_mask = attention_mask[:, -response_length:]
+                    response_mask = model_inputs["response_mask"]
                     old_log_probs = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
 
@@ -252,6 +264,9 @@ class DataParallelPPOActor(BasePPOActor):
                         clip_ratio_low=self.config.clip_ratio_low,
                         clip_ratio_high=self.config.clip_ratio_high,
                         clip_ratio_dual=self.config.clip_ratio_dual,
+                        tau_positive=self.config.tau_positive,
+                        tau_negative=self.config.tau_negative,
+                        loss_type=self.config.loss_type,
                         loss_avg_mode=self.config.loss_avg_mode,
                     )
                     if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
@@ -263,20 +278,17 @@ class DataParallelPPOActor(BasePPOActor):
                             kl_penalty=self.config.kl_penalty,
                         )
                         kl_loss = average_loss(kld, response_mask, mode=self.config.loss_avg_mode)
-                        pg_loss = pg_loss + kl_loss * self.config.kl_coef
+                        loss = pg_loss + kl_loss * self.config.kl_coef
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_coef
+                    else:
+                        loss = pg_loss
 
-                    loss = pg_loss / gradient_accumulation
+                    loss = loss * torch.sum(response_mask) * self.world_size / total_response_tokens
                     loss.backward()
 
-                    batch_metrics = {
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac_higher": pg_metrics["pg_clipfrac_higher"],
-                        "actor/pg_clipfrac_lower": pg_metrics["pg_clipfrac_lower"],
-                        "actor/entropy_loss": pg_metrics["entropy_loss"],
-                        "actor/ppo_kl": pg_metrics["ppo_kl"],
-                    }
+                    batch_metrics = {f"actor/{k}": v for k, v in pg_metrics.items()}
+                    batch_metrics["actor/pg_loss"] = pg_loss.detach().item()
                     append_to_dict(metrics, batch_metrics)
 
                 grad_norm = self._optimizer_step()

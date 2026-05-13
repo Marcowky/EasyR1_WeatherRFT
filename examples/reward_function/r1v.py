@@ -13,9 +13,14 @@
 # limitations under the License.
 
 import re
-from typing import Any, Dict
+from typing import Any
 
 from mathruler.grader import grade_answer
+
+
+# Metadata
+REWARD_NAME = "r1v"
+REWARD_TYPE = "sequential"
 
 
 def format_reward(response: str) -> float:
@@ -37,10 +42,7 @@ def accuracy_reward(response: str, ground_truth: str) -> float:
     return 0.0
 
 
-def compute_score(reward_input: Dict[str, Any], format_weight: float = 0.5) -> Dict[str, float]:
-    if not isinstance(reward_input, dict):
-        raise ValueError("Please use `reward_type=sequential` for r1v reward function.")
-
+def compute_score(reward_input: dict[str, Any], format_weight: float = 0.5) -> dict[str, float]:
     format_score = format_reward(reward_input["response"])
     accuracy_score = accuracy_reward(reward_input["response"], reward_input["ground_truth"])
     return {

@@ -17,17 +17,37 @@ Actor config
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
+
+
+@dataclass
+class LoraConfig:
+    rank: int = 0
+    alpha: int = 64
+    target_modules: str = "all-linear"
+    exclude_modules: Optional[str] = None
+
+    def post_init(self):
+        if not isinstance(self.target_modules, str):
+            raise TypeError("lora.target_modules must be a string like 'all-linear' or 'q_proj,k_proj,v_proj,o_proj'.")
+
+        self.target_modules = self.target_modules.strip()
+        if self.exclude_modules is not None:
+            if not isinstance(self.exclude_modules, str):
+                raise TypeError("lora.exclude_modules must be a string like '.*visual.*'.")
+
+            self.exclude_modules = self.exclude_modules.strip()
 
 
 @dataclass
 class ModelConfig:
     model_path: Optional[str] = None
     tokenizer_path: Optional[str] = None
-    override_config: Dict[str, Any] = field(default_factory=dict)
+    override_config: dict[str, Any] = field(default_factory=dict)
     enable_gradient_checkpointing: bool = True
     trust_remote_code: bool = True
     freeze_vision_tower: bool = False
+    lora: LoraConfig = field(default_factory=LoraConfig)
 
     def post_init(self):
         if self.tokenizer_path is None:
@@ -43,13 +63,13 @@ class ModelConfig:
 @dataclass
 class OptimConfig:
     lr: float = 1e-6
-    betas: Tuple[float, float] = (0.9, 0.999)
+    betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 1e-2
     strategy: str = "adamw"
     lr_warmup_ratio: float = 0.0
     lr_warmup_steps: Optional[int] = None
     min_lr_ratio: Optional[float] = None
-    warmup_style: str = "constant"
+    lr_scheduler_type: str = "constant"
     # below are auto keys
     training_steps: int = field(default=-1, init=False)
 
@@ -92,13 +112,22 @@ class ActorConfig:
     """constant C in dual-clip PPO, clips when advantage < -C"""
     loss_avg_mode: str = "token"
     """loss average mode: `token`, `seq`"""
+    loss_type: str = "default"
+    """loss type: `default`, `gspo`, `cispo`"""
     ppo_epochs: int = 1
     """number of ppo epochs for each rollout batch"""
     padding_free: bool = True
     """use padding-free training"""
+    dynamic_batching: bool = True
+    """enable dynamic batching"""
     ulysses_size: int = 1
     """ulysses sequence parallel size"""
     use_torch_compile: bool = True
+    """enable torch compile"""
+    tau_positive: float = 1.0
+    """temperature for positive tokens"""
+    tau_negative: float = 1.05
+    """temperature for negative tokens"""
     model: ModelConfig = field(default_factory=ModelConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     fsdp: FSDPConfig = field(default_factory=FSDPConfig)
@@ -119,5 +148,6 @@ class RefConfig:
     # below are auto keys
     micro_batch_size_per_device_for_experience: int = field(default=-1, init=False)
     padding_free: bool = field(default=False, init=False)
+    dynamic_batching: bool = field(default=False, init=False)
     ulysses_size: int = field(default=1, init=False)
     use_torch_compile: bool = field(default=True, init=False)

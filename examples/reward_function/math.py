@@ -13,9 +13,14 @@
 # limitations under the License.
 
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from mathruler.grader import extract_boxed_content, grade_answer
+
+
+# Metadata
+REWARD_NAME = "math"
+REWARD_TYPE = "batch"
 
 
 def format_reward(response: str) -> float:
@@ -29,10 +34,7 @@ def accuracy_reward(response: str, ground_truth: str) -> float:
     return 1.0 if grade_answer(answer, ground_truth) else 0.0
 
 
-def compute_score(reward_inputs: List[Dict[str, Any]], format_weight: float = 0.1) -> List[Dict[str, float]]:
-    if not isinstance(reward_inputs, list):
-        raise ValueError("Please use `reward_type=batch` for math reward function.")
-
+def compute_score(reward_inputs: list[dict[str, Any]], format_weight: float = 0.1) -> list[dict[str, float]]:
     scores = []
     for reward_input in reward_inputs:
         response = re.sub(r"\s*(<|>|/)\s*", r"\1", reward_input["response"])  # handle qwen2.5vl-32b format

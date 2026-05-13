@@ -14,7 +14,7 @@
 
 import os
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import torch
@@ -22,11 +22,13 @@ import torch.distributed
 from tensordict import TensorDict
 from transformers import PreTrainedTokenizer, ProcessorMixin
 from vllm import LLM, RequestOutput, SamplingParams
+from vllm.lora.request import LoRARequest
 
 from ...protocol import DataProto
 from ...utils import torch_functional as VF
-from ...utils.dataset import process_image
+from ...utils.dataset import process_image, process_video
 from ...utils.torch_dtypes import PrecisionType
+from ...utils.vllm_utils import VLLMHijack
 from .base import BaseRollout
 from .config import RolloutConfig
 
@@ -39,7 +41,7 @@ def _repeat_interleave(value: Union[torch.Tensor, np.ndarray], repeats: int) -> 
         return np.repeat(value, repeats, axis=0)
 
 
-def _get_logit_bias(processor: Optional[ProcessorMixin]) -> Optional[Dict[int, float]]:
+def _get_logit_bias(processor: Optional[ProcessorMixin]) -> Optional[dict[int, float]]:
     # enforce vllm to not output image token
     # TODO: add video token
     if processor is not None and hasattr(processor, "image_token"):
@@ -49,15 +51,36 @@ def _get_logit_bias(processor: Optional[ProcessorMixin]) -> Optional[Dict[int, f
         return None
 
 
-def _process_multi_modal_data(multi_modal_data: Dict[str, Any], min_pixels: int, max_pixels: int) -> Dict[str, Any]:
+def _process_multi_modal_data(
+    multi_modal_data: dict[str, Any],
+    min_pixels: int,
+    max_pixels: int,
+    video_fps: float,
+    return_video_metadata: bool = False,
+) -> dict[str, Any]:
     # may convert image path to image object
-    # TODO: add video
-    images = []
-    for image in multi_modal_data["images"]:
-        images.append(process_image(image, min_pixels=min_pixels, max_pixels=max_pixels))
+    images, videos = [], []
+    if "images" in multi_modal_data:
+        for image in multi_modal_data["images"]:
+            images.append(process_image(image, min_pixels, max_pixels))
+
+    if "videos" in multi_modal_data:
+        for video in multi_modal_data["videos"]:
+            videos.append(
+                process_video(
+                    video,
+                    min_pixels,
+                    max_pixels,
+                    video_fps,
+                    return_metadata=return_video_metadata,
+                )
+            )
 
     if len(images) != 0:
         return {"image": images}
+
+    if len(videos) != 0:
+        return {"video": videos}
 
     return None
 
@@ -69,6 +92,7 @@ class vLLMRollout(BaseRollout):
         config: RolloutConfig,
         tokenizer: PreTrainedTokenizer,
         processor: Optional[ProcessorMixin],
+        **kwargs,
     ):
         """A vLLM rollout. It requires the module is supported by the vllm.
 
@@ -81,24 +105,30 @@ class vLLMRollout(BaseRollout):
         self.rank = int(os.getenv("RANK", "0"))
         self.config = config
         self.pad_token_id = tokenizer.pad_token_id
+        self.return_video_metadata = processor is not None and "Qwen3VLProcessor" in processor.__class__.__name__
+        self.use_tqdm = (self.rank == 0) and (not config.disable_tqdm)
         if config.tensor_parallel_size > torch.distributed.get_world_size():
             raise ValueError("Tensor parallelism size should be less than world size.")
 
         if config.max_num_batched_tokens < config.prompt_length + config.response_length:
             raise ValueError("max_num_batched_tokens should be greater than prompt_length + response_length.")
 
+        lora_kwargs = kwargs.pop("lora_kwargs", {})
+        self.lora_kwargs = lora_kwargs
+
         engine_kwargs = {}
         if processor is not None:  # only VLMs have processor
             engine_kwargs["disable_mm_preprocessor_cache"] = True
+            if config.limit_images:
+                engine_kwargs["limit_mm_per_prompt"] = {"image": config.limit_images}
 
-        if processor is not None and config.limit_images:
-            engine_kwargs["limit_mm_per_prompt"] = {"image": config.limit_images}
+        VLLMHijack.hijack()
 
         self.inference_engine = LLM(
             model=model_path,
             skip_tokenizer_init=False,
             trust_remote_code=config.trust_remote_code,
-            load_format="dummy",
+            load_format="dummy" if not self.lora_kwargs else "safetensors",
             dtype=PrecisionType.to_str(PrecisionType.to_dtype(config.dtype)),
             seed=config.seed,
             max_model_len=config.max_model_len or config.prompt_length + config.response_length,
@@ -111,6 +141,7 @@ class vLLMRollout(BaseRollout):
             disable_custom_all_reduce=True,
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_sleep_mode=True,
+            **lora_kwargs,
             **engine_kwargs,
         )
 
@@ -162,22 +193,39 @@ class vLLMRollout(BaseRollout):
             raise RuntimeError("vllm sharding manager is not work properly.")
 
         if batch_multi_modal_data is not None:
-            min_pixels, max_pixels = prompts.meta_info["min_pixels"], prompts.meta_info["max_pixels"]
             vllm_inputs = []
             for raw_prompt_ids, multi_modal_data in zip(batch_raw_prompt_ids, batch_multi_modal_data):
                 vllm_inputs.append(
                     {
                         "prompt_token_ids": list(raw_prompt_ids),
-                        "multi_modal_data": _process_multi_modal_data(multi_modal_data, min_pixels, max_pixels),
+                        "multi_modal_data": _process_multi_modal_data(
+                            multi_modal_data,
+                            prompts.meta_info["min_pixels"],
+                            prompts.meta_info["max_pixels"],
+                            prompts.meta_info["video_fps"],
+                            return_video_metadata=self.return_video_metadata,
+                        ),
                     }
                 )
         else:
             vllm_inputs = [{"prompt_token_ids": list(raw_prompt_ids)} for raw_prompt_ids in batch_raw_prompt_ids]
 
+        lora_requests = None
+        if self.lora_kwargs:
+            lora_int_ids = list(self.inference_engine.llm_engine.list_loras())
+            if len(lora_int_ids) > 0:
+                lora_int_id = lora_int_ids[0]
+                lora_requests = [
+                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/simon-stub-path")
+                ] * batch_size
+
         # users can customize different sampling_params at different run
         with self.update_sampling_params(**prompts.meta_info):
-            completions: List[RequestOutput] = self.inference_engine.generate(
-                prompts=vllm_inputs, sampling_params=self.sampling_params, use_tqdm=False
+            completions: list[RequestOutput] = self.inference_engine.generate(
+                prompts=vllm_inputs,
+                sampling_params=self.sampling_params,
+                lora_request=lora_requests,
+                use_tqdm=self.use_tqdm,
             )
             response_ids = [output.token_ids for completion in completions for output in completion.outputs]
             response_ids = VF.pad_2d_list_to_length(
@@ -196,8 +244,8 @@ class vLLMRollout(BaseRollout):
         response_length = response_ids.size(1)
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.view(1, -1).expand(batch_size, -1)
-        if position_ids.dim() == 3:  # qwen2vl mrope
-            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, 3, -1)
+        if position_ids.ndim == 3:  # qwen2vl mrope: (batch_size, 4, seq_length)
+            delta_position_id = delta_position_id.view(batch_size, 1, -1).expand(batch_size, position_ids.size(1), -1)
 
         # prompt: left pad + response: right pad
         # attention_mask: [0,0,0,0,1,1,1,1 | 1,1,1,0,0,0,0,0]
