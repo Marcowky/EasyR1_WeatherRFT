@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import importlib.util
+import inspect
 import os
 import sys
 from collections import defaultdict
 from functools import partial
-from typing import Any, Callable, Optional, Tuple, TypedDict
+from typing import Any, Callable, Optional, Tuple, TypedDict, Union
 
 import torch
 from transformers import PreTrainedTokenizer
@@ -26,7 +27,7 @@ from ...protocol import DataProto
 from .config import RewardConfig
 
 
-class RewardInput(TypedDict):
+class RewardInput(TypedDict, total=False):
     response: str
     response_length: int
     ground_truth: str
@@ -45,6 +46,38 @@ SequentialRewardFunction = Callable[[RewardInput], RewardScore]
 BatchRewardFunction = Callable[[list[RewardInput]], list[RewardScore]]
 
 
+def _maybe_add_non_tensor_field(reward_input: RewardInput, data: DataProto, key: str, index: int) -> None:
+    values = data.non_tensor_batch.get(key)
+    if values is not None:
+        reward_input[key] = values[index]
+
+
+def _reward_accepts_context(reward_fn: Callable) -> bool:
+    try:
+        signature = inspect.signature(reward_fn)
+    except (TypeError, ValueError):
+        return False
+
+    parameters = signature.parameters
+    if any(param.kind == inspect.Parameter.VAR_POSITIONAL for param in parameters.values()):
+        return True
+
+    return {"cur_stat", "cur_step", "save_path"}.issubset(parameters)
+
+
+def _call_reward_fn(
+    reward_fn: Callable,
+    reward_inputs: Union[RewardInput, list[RewardInput]],
+    cur_stat: str,
+    cur_step: int,
+    save_path: str,
+) -> Union[RewardScore, list[RewardScore]]:
+    if _reward_accepts_context(reward_fn):
+        return reward_fn(reward_inputs, cur_stat=cur_stat, cur_step=cur_step, save_path=save_path)
+
+    return reward_fn(reward_inputs)
+
+
 class SequentialFunctionRewardManagerMixin:
     reward_fn: SequentialRewardFunction
 
@@ -61,14 +94,16 @@ class SequentialFunctionRewardManagerMixin:
             response_str = self.tokenizer.decode(
                 valid_response_ids, skip_special_tokens=self.config.skip_special_tokens
             )
-            score = self.reward_fn(
-                {
-                    "response": response_str,
-                    "response_length": cur_response_length,
-                    "ground_truth": data.non_tensor_batch["ground_truth"][i],
-                    "problem": data.non_tensor_batch["problem"][i],
-                    "multi_modal_data": data.non_tensor_batch["multi_modal_data"][i],
-                },
+            reward_input: RewardInput = {
+                "response": response_str,
+                "response_length": cur_response_length,
+                "ground_truth": data.non_tensor_batch["ground_truth"][i],
+            }
+            _maybe_add_non_tensor_field(reward_input, data, "problem", i)
+            _maybe_add_non_tensor_field(reward_input, data, "multi_modal_data", i)
+            score = _call_reward_fn(
+                self.reward_fn,
+                reward_input,
                 cur_stat,
                 cur_step,
                 save_path,
@@ -95,17 +130,16 @@ class BatchFunctionRewardManagerMixin:
             response_str = self.tokenizer.decode(
                 valid_response_ids, skip_special_tokens=self.config.skip_special_tokens
             )
-            reward_inputs.append(
-                {
-                    "response": response_str,
-                    "response_length": cur_response_length,
-                    "ground_truth": data.non_tensor_batch["ground_truth"][i],
-                    "problem": data.non_tensor_batch["problem"][i],
-                    "multi_modal_data": data.non_tensor_batch["multi_modal_data"][i],
-                }
-            )
+            reward_input: RewardInput = {
+                "response": response_str,
+                "response_length": cur_response_length,
+                "ground_truth": data.non_tensor_batch["ground_truth"][i],
+            }
+            _maybe_add_non_tensor_field(reward_input, data, "problem", i)
+            _maybe_add_non_tensor_field(reward_input, data, "multi_modal_data", i)
+            reward_inputs.append(reward_input)
 
-        scores = self.reward_fn(reward_inputs, cur_stat, cur_step, save_path)
+        scores = _call_reward_fn(self.reward_fn, reward_inputs, cur_stat, cur_step, save_path)
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
         for i, score in enumerate(scores):
